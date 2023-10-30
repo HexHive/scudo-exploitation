@@ -267,9 +267,18 @@ def search_for_scudo_large_block() -> int:
         addr = parse_address("Allocator.Secondary.InUseBlocks.First")
     except gdb.error:
         addr = parse_address("*(*(((void***)&Allocator)+8)-6)")
+                
+    return addr
 
-        
-        
+@lru_cache()
+def search_for_scudo_large_block_cache() -> int:
+    """A helper function to find the address of the first element of the list of cached secondary blocks."""
+
+    try:
+        addr = parse_address("&Allocator.Secondary.Cache.Entries")
+    except gdb.error:
+        addr = parse_address("((void*)&Allocator)+0x22a8")
+                
     return addr
 
 
@@ -916,12 +925,157 @@ class ScudoLargeBlock:
         ]
         return "\n".join(msg) + "\n"
 
+class ScudoCachedBlock:
+    """Scudo large block class"""
+
+    @staticmethod
+    def cached_block_t() -> Type[ctypes.Structure]:
+        pointer = ctypes.c_uint64 if gef and gef.arch.ptrsize == 8 else ctypes.c_uint32
+        fields = [
+            ("commit_base", pointer),
+            ("commit_size", pointer),
+            ("map_base", pointer),
+            ("map_size", pointer),
+            ("block_begin", pointer),
+            ("time", ctypes.c_uint64),
+        ]
+
+        class cached_block_cls(ctypes.Structure):
+            _fields_ = fields
+        return cached_block_cls
+
+    def __init__(self, addr: str) -> None:
+        self.__address : int = parse_address(f"{addr}")
+
+        self.reset()
+        return
+
+    def reset(self):
+        self._sizeof = ctypes.sizeof(ScudoCachedBlock.cached_block_t())
+        self._data = gef.memory.read(self.__address, ctypes.sizeof(ScudoCachedBlock.cached_block_t()))
+        self.__cached_block = ScudoCachedBlock.cached_block_t().from_buffer_copy(self._data)
+        return
+
+    def __abs__(self) -> int:
+        return self.__address
+
+    def __int__(self) -> int:
+        return self.__address
+
+    @property
+    def address(self) -> int:
+        return self.__address
+
+    @property
+    def sizeof(self) -> int:
+        return self._sizeof
+
+    @property
+    def addr(self) -> int:
+        return int(self)
+
+    @property
+    def commit_base(self) -> int:
+        return self.__cached_block.commit_base
+
+    @property
+    def commit_size(self) -> int:
+        return self.__cached_block.commit_size
+
+    @property
+    def map_base(self) -> int:
+        return self.__cached_block.map_base
+    
+    @property
+    def map_size(self) -> int:
+        return self.__cached_block.map_size
+
+    @property
+    def block_begin(self) -> int:
+        return self.__cached_block.block_begin
+
+    @property
+    def data(self) -> int:
+        return self.__cached_block.data
+
+    @property
+    def time(self) -> int:
+        return self.__cached_block.time
+    
+    @property
+    def next_addr(self) -> int:
+        return self.addr + self.sizeof
+
+    def get_next_cached_block(self) -> "ScudoCachedBlock":
+        addr = self.next_addr
+        return ScudoCachedBlock(addr)
+
+    @property
+    def prev_addr(self) -> int:
+        return self.addr - self.sizeof
+
+    def get_prev_cached_block(self) -> "ScudoCachedBlock":
+        addr = self.prev_addr
+        return ScudoCachedBlock(addr)
+    
+    def __iter__(self) -> Generator["ScudoCachedBlock", None, None]:
+        current_block = self
+
+        while current_block.next_addr:
+            yield current_block
+
+            next_block_addr = current_block.next_addr()
+
+            if not Address(value=next_block_addr).valid:
+                break
+
+            next_block = current_block.get_next_cached_block()
+            if next_block is None:
+                break
+            current_block = next_block
+        return
+
+    def __str__(self) -> str:
+        properties = f"base={self.__address:#x}, map size={self.map_size:#x}"
+        return (f"{Color.colorify('LargeCachedBlock', 'blue bold underline')}({properties})")
+
+    def __repr__(self) -> str:
+        return f"LargeCachedBlock(address={self.__address:#x}, size={self._sizeof})"
+
+    def __str_extended(self) -> str:
+        msg = []
+
+        msg.append("Commit base: {0:#x}".format(self.commit_base))
+        msg.append("Commit size: {0:d}".format(self.commit_size))
+
+        msg.append("Map base: {0:#x}".format(self.map_base))
+        msg.append("Map size: {0:d}".format(self.map_size))
+
+        msg.append("Block begin: {0:#x}".format(self.block_begin))
+
+        msg.append("Time: {0:#x}".format(self.time))
+
+        return "\n".join(msg)
+
+        
+    def psprint(self) -> str:
+        msg = [
+            str(self),
+            self.__str_extended(),
+        ]
+        return "\n".join(msg) + "\n"
+
+
+
+
+
+    
 @register
 class ScudoHeapCommand(GenericCommand):
     """Base command to get information about the Scudo heap structure."""
 
     _cmdline_ = "scudo"
-    _syntax_  = f"{_cmdline_} (chunk|regions|region|batchgroup|transferbatch|perclass|largeblock)"
+    _syntax_  = f"{_cmdline_} (chunk|regions|region|batchgroup|transferbatch|perclass|largeblock|largecachedblock)"
 
     def __init__(self) -> None:
         super().__init__(prefix=True)
@@ -1210,5 +1364,50 @@ class ScudoLargeBlockCommand(GenericCommand):
         else:
             gef_print(current_block.psprint())
         return
+
+@register
+class ScudoCachedBlockCommand(GenericCommand):
+    """Display information on a large cached block.
+    See TODO."""
+
+    _cmdline_ = "scudo largecachedblock"
+    _syntax_  = f"{_cmdline_} [-h] [--number] [address]"
+
+    def __init__(self) -> None:
+        super().__init__(complete=gdb.COMPLETE_LOCATION)
+        return
+
+    @parse_arguments({"address": ""}, {"--number": 1})
+    @only_if_gdb_running
+    def do_invoke(self, _: List[str], **kwargs: Any) -> None:
+        args : argparse.Namespace = kwargs["arguments"]
+        
+        addr = None
+        if not args.address:
+            addr = search_for_scudo_large_block_cache()
+        else:
+            addr = parse_address(args.address)
+            
+        current_block = ScudoCachedBlock(addr)
+
+        if args.number > 1:
+            for _i in range(args.number):
+                if current_block.sizeof == 0:
+                    break
+
+                gef_print(str(current_block))
+                next_block_addr = current_block.next_addr
+                if not Address(value=next_block_addr).valid:
+                    break
+
+                next_block = current_block.get_next_cached_block()
+                if next_block is None:
+                    break
+
+                current_block = next_block
+        else:
+            gef_print(current_block.psprint())
+        return
+
 
 gef.gdb.load()
