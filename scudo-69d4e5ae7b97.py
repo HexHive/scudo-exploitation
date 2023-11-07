@@ -193,7 +193,7 @@ class ScudoChunk:
 
     @property
     def classid(self) -> int:
-        return self._chunk.size & 0xf
+        return self._chunk.size & 0xff
 
     @property
     def was_zeroed(self) -> bool:
