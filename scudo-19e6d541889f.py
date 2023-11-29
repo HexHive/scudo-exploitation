@@ -1342,13 +1342,13 @@ class ScudoLargeBlockCommand(GenericCommand):
     See TODO."""
 
     _cmdline_ = "scudo largeblock"
-    _syntax_  = f"{_cmdline_} [-h] [--number] [address]"
+    _syntax_  = f"{_cmdline_} [-h] [--number NUMBER] [--from-base] [address]"
 
     def __init__(self) -> None:
         super().__init__(complete=gdb.COMPLETE_LOCATION)
         return
 
-    @parse_arguments({"address": ""}, {"--number": 1})
+    @parse_arguments({"address": ""}, {"--number": 1, "--from-base": True})
     @only_if_gdb_running
     def do_invoke(self, _: List[str], **kwargs: Any) -> None:
         args : argparse.Namespace = kwargs["arguments"]
@@ -1359,7 +1359,7 @@ class ScudoLargeBlockCommand(GenericCommand):
         else:
             addr = parse_address(args.address)
             
-        current_block = ScudoLargeBlock(addr, from_base = not args.address)
+        current_block = ScudoLargeBlock(addr, from_base = args.from_base or not args.address)
 
         if args.number > 1:
             for _i in range(args.number):
